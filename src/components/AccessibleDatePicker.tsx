@@ -2,7 +2,7 @@ import React, { useRef, useState, useEffect } from "react";
 
 type DatePickerProps = {
   value?: string | Date;
-  onChange?: (date: Date | null) => void;
+  onChange?: (date: Date | string | null) => void;
   dateFormat?: string;
   separator?: string;
   locale?: string;
@@ -11,6 +11,8 @@ type DatePickerProps = {
   placeholder?: string;
   required?: boolean;
   disabled?: boolean;
+  // If true, onChange returns a locale-formatted string instead of a Date object
+  returnString?: boolean;
 };
 
 function parseFormat(format: string = "DD.MM.YYYY", separator: string = ".") {
@@ -35,21 +37,9 @@ function parseDateStr(dateStr: string, format: string, separator: string) {
   return null;
 }
 
-function formatDate(
-  date: Date | null,
-  format: string,
-  locale: string,
-  separator: string
-) {
+function formatDate(date: Date | null, format: string, separator: string) {
   if (!date) return "";
   const order = parseFormat(format, separator);
-  const dt = new Intl.DateTimeFormat(locale, {
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-  }).format(date);
-  // Map parts based on order
-  const parts = dt.split(/[^\d]+/);
   const mapping: Record<string, string> = {};
   mapping["YYYY"] = date.getFullYear().toString();
   mapping["MM"] = ("0" + (date.getMonth() + 1)).slice(-2);
@@ -79,108 +69,254 @@ export const AccessibleDatePicker: React.FC<DatePickerProps> = ({
   placeholder,
   required = false,
   disabled = false,
+  returnString = false,
 }) => {
-  const [inputVal, setInputVal] = useState<string>("");
+  const [rawValues, setRawValues] = useState<Record<string, string>>({
+    DD: "",
+    MM: "",
+    YYYY: "",
+  });
+
+  const [focusedSegment, setFocusedSegment] = useState<string>("DD");
+  const [caretSegment, setCaretSegment] = useState<string>("DD");
+
+  const order = parseFormat(dateFormat, separator);
+  const formatIndices = getSegmentIndices(dateFormat, separator);
 
   const inputRef = useRef<HTMLInputElement>(null);
-  const formatIndices = getSegmentIndices(dateFormat, separator);
-  const order = parseFormat(dateFormat, separator);
+
+  const allowedChars = new Set([
+    "0",
+    "1",
+    "2",
+    "3",
+    "4",
+    "5",
+    "6",
+    "7",
+    "8",
+    "9",
+    separator,
+  ]);
+
+  // Compose displayed value merging user input and placeholder segments
+  const composeDisplayValue = () => {
+    return order
+      .map((seg) => {
+        const val = rawValues[seg];
+        if (val.length === 0) return seg;
+        if (seg === "YYYY") return val.padStart(4, "Y");
+        return val.padStart(seg.length, "0");
+      })
+      .join(separator);
+  };
 
   useEffect(() => {
     if (value) {
       const date = typeof value === "string" ? new Date(value) : value;
-      setInputVal(formatDate(date, dateFormat, locale, separator));
+      setRawValues({
+        DD: ("0" + date.getDate()).slice(-2),
+        MM: ("0" + (date.getMonth() + 1)).slice(-2),
+        YYYY: date.getFullYear().toString(),
+      });
     } else {
-      setInputVal("");
+      setRawValues({ DD: "", MM: "", YYYY: "" });
     }
-  }, [value, dateFormat, separator, locale]);
+  }, [value]);
+
+  // Sync caretSegment state with focusedSegment to control caret after render
+  useEffect(() => {
+    setCaretSegment(focusedSegment);
+  }, [focusedSegment]);
+
+  useEffect(() => {
+    if (!caretSegment) return;
+    const [start, end] = formatIndices[caretSegment];
+    window.requestAnimationFrame(() => {
+      inputRef.current?.setSelectionRange(start, end);
+    });
+  }, [caretSegment, formatIndices]);
+
+  const isValidSegment = (seg: string, val: string) => {
+    if (val.length === 0) return true;
+    if (!/^\d+$/.test(val)) return false;
+    const num = parseInt(val, 10);
+    if (seg === "DD") return num >= 1 && num <= 31;
+    if (seg === "MM") return num >= 1 && num <= 12;
+    if (seg === "YYYY") return val.length <= 4;
+    return true;
+  };
+
+  const isSegmentComplete = (seg: string, val: string) => {
+    if (seg === "YYYY") return val.length === 4;
+    return val.length === seg.length;
+  };
+
+  const focusNextSegment = () => {
+    const currentIndex = order.indexOf(focusedSegment);
+    if (currentIndex < order.length - 1) {
+      const nextSegment = order[currentIndex + 1];
+      setFocusedSegment(nextSegment);
+    }
+  };
 
   const handleInput = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const v = e.target.value;
-    setInputVal(v);
-    const parsed = parseDateStr(v, dateFormat, separator);
+    const val = e.target.value;
+    const filtered = [...val].filter((ch) => allowedChars.has(ch)).join("");
+    if (filtered !== val) return;
+
+    const parts = filtered.split(separator);
+    if (parts.length > order.length) return;
+
+    const newRaw: Record<string, string> = { ...rawValues };
+    for (let i = 0; i < parts.length; i++) {
+      const seg = order[i];
+      const segmentVal = parts[i];
+
+      if (!isValidSegment(seg, segmentVal)) return;
+      if (
+        segmentVal.length > seg.length &&
+        !(seg === "YYYY" && segmentVal.length <= 4)
+      )
+        return;
+
+      newRaw[seg] = segmentVal;
+    }
+
+    setRawValues(newRaw);
+
+    const currentVal = newRaw[focusedSegment];
     if (
-      parsed &&
-      (!min || parsed >= new Date(min)) &&
-      (!max || parsed <= new Date(max))
+      isSegmentComplete(focusedSegment, currentVal) &&
+      isValidSegment(focusedSegment, currentVal)
     ) {
-      onChange?.(parsed);
+      focusNextSegment();
+    }
+
+    // Format for onChange
+    const composedDateStr = order
+      .map((seg) => newRaw[seg].padStart(seg.length, seg))
+      .join(separator);
+    const parsedDate = parseDateStr(composedDateStr, dateFormat, separator);
+
+    if (
+      parsedDate &&
+      (!min || parsedDate >= new Date(min)) &&
+      (!max || parsedDate <= new Date(max))
+    ) {
+      if (returnString) {
+        onChange?.(parsedDate.toLocaleDateString(locale));
+      } else {
+        onChange?.(parsedDate);
+      }
     } else {
       onChange?.(null);
     }
   };
 
-  const formatValueForAria = inputVal || (placeholder ?? dateFormat);
-  const isInvalid = inputVal && !parseDateStr(inputVal, dateFormat, separator);
-
   const handleKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
-    const pos = inputRef.current?.selectionStart ?? 0;
-    const currentSeg = order.findIndex((seg) => {
-      const [s, f] = formatIndices[seg];
-      return pos >= s && pos <= f;
-    });
-    if (currentSeg < 0) return;
+    const controlKeys = new Set([
+      "Backspace",
+      "Tab",
+      "ArrowLeft",
+      "ArrowRight",
+      "Delete",
+      "Home",
+      "End",
+      "Enter",
+      separator,
+      "ArrowUp",
+      "ArrowDown",
+    ]);
+    if (!allowedChars.has(e.key) && !controlKeys.has(e.key)) {
+      e.preventDefault();
+      return;
+    }
 
-    if (e.key === "ArrowLeft" && currentSeg > 0) {
-      e.preventDefault();
-      const seg = order[currentSeg - 1];
+    const pos = inputRef.current?.selectionStart ?? 0;
+    const currentSegIndex = order.findIndex((seg) => {
       const [start, end] = formatIndices[seg];
-      inputRef.current!.setSelectionRange(start, end);
-    }
-    if (e.key === "ArrowRight" && currentSeg < order.length - 1) {
+      return pos >= start && pos <= end;
+    });
+
+    if (currentSegIndex < 0) return;
+
+    if (e.key === "ArrowLeft" && currentSegIndex > 0) {
       e.preventDefault();
-      const seg = order[currentSeg + 1];
-      const [start, end] = formatIndices[seg];
-      inputRef.current!.setSelectionRange(start, end);
+      setFocusedSegment(order[currentSegIndex - 1]);
     }
-    if (["ArrowUp", "ArrowDown"].includes(e.key)) {
-      let date = parseDateStr(inputVal, dateFormat, separator);
+    if (e.key === "ArrowRight" && currentSegIndex < order.length - 1) {
+      e.preventDefault();
+      setFocusedSegment(order[currentSegIndex + 1]);
+    }
+    if (e.key === "ArrowUp" || e.key === "ArrowDown") {
+      e.preventDefault();
+      const date = parseDateStr(
+        composeDisplayValue().replace(/[A-Z]+/g, "0"),
+        dateFormat,
+        separator
+      );
       if (!date) return;
+
       let day = date.getDate();
       let month = date.getMonth() + 1;
       let year = date.getFullYear();
 
-      if (order[currentSeg] === "DD") day += e.key === "ArrowUp" ? 1 : -1;
-      if (order[currentSeg] === "MM") month += e.key === "ArrowUp" ? 1 : -1;
-      if (order[currentSeg] === "YYYY") year += e.key === "ArrowUp" ? 1 : -1;
+      if (order[currentSegIndex] === "DD") day += e.key === "ArrowUp" ? 1 : -1;
+      if (order[currentSegIndex] === "MM")
+        month += e.key === "ArrowUp" ? 1 : -1;
+      if (order[currentSegIndex] === "YYYY")
+        year += e.key === "ArrowUp" ? 1 : -1;
 
-      date.setDate(day);
-      date.setMonth(month - 1);
-      date.setFullYear(year);
+      const newDate = new Date(year, month - 1, day);
+      setRawValues({
+        DD: ("0" + newDate.getDate()).slice(-2),
+        MM: ("0" + (newDate.getMonth() + 1)).slice(-2),
+        YYYY: newDate.getFullYear().toString(),
+      });
 
-      setInputVal(formatDate(date, dateFormat, locale, separator));
-      onChange?.(date);
-      setTimeout(() => {
-        const [start, end] = formatIndices[order[currentSeg]];
-        inputRef.current?.setSelectionRange(start, end);
-      }, 0);
-      e.preventDefault();
-    }
-    if (e.key === separator) {
-      e.preventDefault();
-      if (currentSeg < order.length - 1) {
-        const nextSeg = order[currentSeg + 1];
-        const [start, end] = formatIndices[nextSeg];
-        inputRef.current?.setSelectionRange(start, end);
+      if (returnString) {
+        onChange?.(newDate.toLocaleDateString(locale));
+      } else {
+        onChange?.(newDate);
       }
     }
+
+    if (e.key === separator && currentSegIndex < order.length - 1) {
+      e.preventDefault();
+      setFocusedSegment(order[currentSegIndex + 1]);
+    }
   };
+
+  const handleFocus = () => {
+    setFocusedSegment(focusedSegment);
+  };
+
+  const displayValue = composeDisplayValue();
 
   return (
     <input
       ref={inputRef}
       type="text"
       inputMode="numeric"
-      value={inputVal}
+      value={displayValue}
       onChange={handleInput}
       onKeyDown={handleKeyDown}
+      onFocus={handleFocus}
       placeholder={placeholder ?? dateFormat}
       aria-label={`Date input in format ${dateFormat}`}
       aria-required={required}
-      aria-invalid={isInvalid}
+      aria-invalid={
+        !!displayValue &&
+        !parseDateStr(
+          displayValue.replace(/[A-Z]+/g, "0"),
+          dateFormat,
+          separator
+        )
+      }
       disabled={disabled}
       autoComplete="off"
-      //   style={{ width: "11em" }}
+      style={{ width: "11em", caretColor: "black" }}
       title="Date input"
     />
   );

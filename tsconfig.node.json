@@ -1,5 +1,6 @@
 {
   "compilerOptions": {
+    "composite": true,
     "module": "NodeNext",
     "moduleResolution": "NodeNext",
     "target": "ESNext",
@@ -9,5 +10,10 @@
     "forceConsistentCasingInFileNames": true,
     "strict": true
   },
-  "include": ["src"]
+  "include": [
+    "vite.config.ts",
+    "vitest.config.ts",
+    "*.config.ts",
+    "scripts/**/*.ts"
+  ]
 }
